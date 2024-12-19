@@ -1,11 +1,14 @@
 import { Image, StyleSheet, Platform, Pressable } from 'react-native';
+import ByteBuffer from 'bytebuffer';
 
 import { HelloWave } from '@/components/HelloWave';
 import ParallaxScrollView from '@/components/ParallaxScrollView';
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
 import { BleError, BleManager, Characteristic, Device } from 'react-native-ble-plx';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Buffer } from "buffer";
+import base64js from 'base64-js';
 
 let bleManager = new BleManager();
 
@@ -19,10 +22,12 @@ const HOMEDICS_READ_CHARACTERISTIC = '0000fff4-0000-1000-8000-00805f9b34fb';
 
 export default function HomeScreen() {
 
-  const [device, setDevice] = useState<Device | null>(null); 
+  const writeCharacteristicRef = useRef<Characteristic | null>(null);
+  const readCharacteristicRef = useRef<Characteristic | null>(null);
 
   const scanForMonitors = useCallback(async () => {
 
+    console.log('Scanning for devices...');
     const onDeviceDiscovered = async (error: BleError, device: Device) => {  
       if (error) {
         // Handle error
@@ -30,28 +35,64 @@ export default function HomeScreen() {
         return;
       }
 
-      bleManager.stopDeviceScan();
+      console.log('Stopping scan...'); 
+      await bleManager.stopDeviceScan();
+   
+      try {
+        const connectedDevice = await device.connect();
+        await connectedDevice.discoverAllServicesAndCharacteristics();
+    
+        const characteristics = await connectedDevice.characteristicsForService(HOMEDICS_COMMUNICATION_SERVICE);
+        console.log('found characteristics:', characteristics.length);
+    
+        writeCharacteristicRef.current = characteristics.find(
+          (c: Characteristic) => c.uuid === HOMEDICS_WRITE_CHARACTERISTIC
+        );
+        readCharacteristicRef.current = characteristics.find(
+          (c: Characteristic) => c.uuid === HOMEDICS_READ_CHARACTERISTIC
+        );
+    
+        await queryMonitor(writeCharacteristicRef.current, readCharacteristicRef.current);
+      } catch (error) {
+        console.error('Error during device connection or communication:', error);
+      }
 
-      setDevice(device);
+
     };
     
     await bleManager.startDeviceScan([HOMEDICS_COMMUNICATION_SERVICE], null, onDeviceDiscovered);
   }, []);
 
-  const connectToDevice = useCallback(async () => {
-    if (device) {
-      await device.connect();
-      await device.discoverAllServicesAndCharacteristics();
-      const charachteristics =  await device.characteristicsForService(HOMEDICS_COMMUNICATION_SERVICE);
+  const queryMonitor = useCallback(async (write: Characteristic, read: Characteristic) => {
 
-      const writeCharacteristic = charachteristics?.find((c: Characteristic) => c.uuid === HOMEDICS_WRITE_CHARACTERISTIC);
-      const readCharacteristic = charachteristics?.find((c: Characteristic) => c.uuid === HOMEDICS_READ_CHARACTERISTIC);
-
-
-      // writeCharacteristic.writeWithResponse(base64js.fromByteArray(value))
-
+    const queryData = ByteBuffer.allocate(4);
+    queryData.writeInt8(0x6C, 0);
+    queryData.writeInt8(0x80, 1);
+    queryData.writeInt8(0x00, 2);
+    queryData.writeInt8(0xEC, 3);
+    
+    console.log('Querying monitor...', queryData.view);
+    
+    try { 
+      
+      read.monitor((error, res: Characteristic) => {
+        if (error) {
+          console.log('Error monitoring characteristic: ', error);
+          return;
+        }
+        const bytesList = Object.values(base64js.toByteArray(res.value))
+        
+        console.log('Query results are: ', bytesList);
+      });
+      
+     await write.writeWithResponse(base64js.fromByteArray(queryData.view));
+       
     }
-   }, [device]);
+    catch (error) {
+      console.log('Error writing to device: ', error);
+    } 
+
+   },[]);
 
   return (
     <ParallaxScrollView
@@ -68,7 +109,7 @@ export default function HomeScreen() {
       </ThemedView>
       <ThemedView style={styles.stepContainer}>
         <ThemedText type="subtitle">Step 1: Pair monitor</ThemedText>
-        <Pressable style={{justifyContent: 'center', height: 50}} onPress={() => alert('Pressed!')}>
+        <Pressable style={{justifyContent: 'center', height: 50}} onPress={() => scanForMonitors()}>
           <ThemedText type="link">Press to Pair monitor</ThemedText>
         </Pressable>
       </ThemedView>
